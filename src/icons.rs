@@ -91,16 +91,16 @@ unsafe fn read_bitmap(hbm: HBITMAP) -> Option<(u32, u32, Vec<u8>)> {
         return None;
     }
     // Some bitmaps carry no alpha at all (photos): make them opaque.
-    let any_alpha = buf.chunks_exact(4).any(|p| p[3] != 0);
+    let any_alpha = buf.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
     if !any_alpha {
-        for p in buf.chunks_exact_mut(4) {
+        for p in buf.as_chunks_mut::<4>().0 {
             p[3] = 255;
         }
     } else {
         // Premultiply only if the data is straight alpha.
-        let straight = buf.chunks_exact(4).any(|p| p[0] > p[3] || p[1] > p[3] || p[2] > p[3]);
+        let straight = buf.as_chunks::<4>().0.iter().any(|p| p[0] > p[3] || p[1] > p[3] || p[2] > p[3]);
         if straight {
-            for p in buf.chunks_exact_mut(4) {
+            for p in buf.as_chunks_mut::<4>().0 {
                 let a = p[3] as u32;
                 p[0] = ((p[0] as u32 * a + 127) / 255) as u8;
                 p[1] = ((p[1] as u32 * a + 127) / 255) as u8;
