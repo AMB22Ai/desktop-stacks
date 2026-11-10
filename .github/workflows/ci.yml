@@ -21,7 +21,7 @@ jobs:
     name: Windows (MSVC) lint, test, build
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component clippy
@@ -39,7 +39,7 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER: /usr/lib/wine/wine64
       WINEDEBUG: "-all"
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 wine64
