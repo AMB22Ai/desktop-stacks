@@ -83,6 +83,16 @@ pub enum MenuOutcome {
     Rename,
 }
 
+/// Destroys a popup menu when it goes out of scope, on every way out of a function.
+struct MenuGuard(HMENU);
+impl Drop for MenuGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyMenu(self.0);
+        }
+    }
+}
+
 /// A delete chosen for several files at once (right-click on a closed stack) is asked
 /// about first: on a default Windows the Recycle Bin does not ask, and most files of a
 /// closed stack are not even visible.
@@ -115,6 +125,10 @@ fn run_menu(hwnd: HWND, cm: IContextMenu, pt: POINT, extra: &[(usize, String)], 
             Ok(m) => m,
             Err(_) => return (MenuOutcome::None, 0),
         };
+        // The menu must stay alive until the chosen command has run: the "New" submenu
+        // keeps what each of its entries creates inside the menu itself, and finds
+        // nothing to create if the menu is already gone.
+        let _menu_alive = MenuGuard(menu);
         for (id, label) in extra {
             let _ = AppendMenuW(menu, MF_STRING, *id, &HSTRING::from(label.as_str()));
         }
@@ -123,14 +137,12 @@ fn run_menu(hwnd: HWND, cm: IContextMenu, pt: POINT, extra: &[(usize, String)], 
         }
         let pos = GetMenuItemCount(menu).max(0) as u32;
         if cm.QueryContextMenu(menu, pos, FIRST, LAST, CMF_NORMAL | CMF_CANRENAME).is_err() {
-            let _ = DestroyMenu(menu);
             return (MenuOutcome::None, 0);
         }
         ACTIVE_MENU.with(|m| *m.borrow_mut() = cm.cast::<IContextMenu2>().ok());
         let _ = SetForegroundWindow(hwnd);
         let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, pt.x, pt.y, hwnd, None).0 as u32;
         ACTIVE_MENU.with(|m| *m.borrow_mut() = None);
-        let _ = DestroyMenu(menu);
         let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
         if cmd == 0 {
             return (MenuOutcome::None, 0);
