@@ -62,6 +62,12 @@ pub fn is_game_shortcut(path: &str) -> Option<bool> {
     if !meta.file_type().is_file() {
         return Some(false);
     }
+    // Known and accepted: the file could be swapped for a link between the check above
+    // and the open below, and the open would follow it. All that can come of it is a
+    // wrong yes/no answer held in memory: at most MAX_READ bytes are read and nothing
+    // is kept or shown. Opening without following links was left out on purpose, because
+    // it changes how every shortcut is read and could not be tested on desktops that
+    // are synced by a cloud service.
     let file = std::fs::File::open(path).ok()?;
     if !file.metadata().ok()?.file_type().is_file() {
         return Some(false);

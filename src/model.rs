@@ -228,13 +228,35 @@ fn display_name_cached(path: &str, mtime: u64, fallback: &str) -> String {
 }
 
 /// Removes characters that can disguise a file name on screen: bidi embedding /
-/// override / isolate controls (U+202A-U+202E, U+2066-U+2069) and control chars.
-/// Ordinary Arabic text and the LRM/RLM marks are kept. Display only: the real
-/// file is always opened by its real path.
+/// override / isolate controls (U+202A-U+202E, U+2066-U+2069), control chars and
+/// invisible characters. Any run of blank space, including characters that only look
+/// blank, becomes one ordinary space and is dropped at both ends, so padding cannot
+/// push the end of a name out of sight. Ordinary Arabic text and the LRM/RLM marks are
+/// kept. Display only: the real file is always opened by its real path.
 pub fn clean_label(s: &str) -> String {
-    s.chars()
-        .filter(|&c| !c.is_control() && !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}' | '\u{180E}' | '\u{2028}' | '\u{2029}'))
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    let mut gap = false;
+    for c in s.chars() {
+        if c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}' | '\u{180E}' | '\u{2028}' | '\u{2029}') {
+            continue;
+        }
+        if is_blank(c) {
+            gap = true;
+            continue;
+        }
+        if gap && !out.is_empty() {
+            out.push(' ');
+        }
+        gap = false;
+        out.push(c);
+    }
+    out
+}
+
+/// White space, plus characters that are drawn as empty space without being white
+/// space: braille blank and the Hangul fillers.
+fn is_blank(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{2800}' | '\u{3164}' | '\u{FFA0}' | '\u{115F}' | '\u{1160}')
 }
 
 fn display_name(path: &str, fallback: &str) -> String {
@@ -448,6 +470,15 @@ mod tests {
         assert_eq!(clean_label("report (final).docx"), "report (final).docx");
         assert_eq!(clean_label("\u{0645}\u{0644}\u{0641} \u{200F}1.pdf"), "\u{0645}\u{0644}\u{0641} \u{200F}1.pdf");
         assert_eq!(clean_label("\u{0645}\u{200C}\u{0647} \u{1F468}\u{200D}\u{1F469}"), "\u{0645}\u{200C}\u{0647} \u{1F468}\u{200D}\u{1F469}");
+    }
+    #[test]
+    fn blank_padding_cannot_push_the_end_of_a_name_out_of_sight() {
+        let pad = "\u{2800}".repeat(40);
+        assert_eq!(clean_label(&format!("Invoice 2026.pdf{pad}.exe")), "Invoice 2026.pdf .exe");
+        assert_eq!(clean_label("a\u{3164}\u{FFA0}\u{115F}\u{1160}b"), "a b");
+        assert_eq!(clean_label("a\u{00A0}\u{2003} \u{3000}b"), "a b");
+        assert_eq!(clean_label("  a   b  "), "a b");
+        assert_eq!(clean_label("\u{2800}\u{2800}"), "");
     }
 }
 

@@ -9,33 +9,46 @@ on:
 permissions:
   contents: read
 
+env:
+  # One fixed Rust version, so a new compiler or a new lint cannot change a build by
+  # surprise. Raise it on purpose, and keep the same value in release.yml.
+  RUST_VERSION: "1.99.1"
+
+# Actions are pinned to a full commit id (the version is in the comment): a tag can be
+# moved to other code later, a commit id cannot.
 jobs:
   windows:
     name: Windows (MSVC) lint, test, build
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      - run: rustup toolchain install stable --profile minimal --component clippy
-      - run: rustup default stable
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component clippy
+      - run: rustup default ${{ env.RUST_VERSION }}
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo build --release --locked
       - run: python tools/check_imports.py target/release/desktop-stacks.exe
 
   cross:
-    name: Linux cross-build (MinGW) and audit
-    runs-on: ubuntu-latest
+    name: Linux cross-build (MinGW), tests under Wine, audit
+    runs-on: ubuntu-24.04
+    env:
+      # The MinGW build is the one that gets released, so its tests run too (with Wine).
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER: /usr/lib/wine/wine64
+      WINEDEBUG: "-all"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
-      - run: rustup toolchain install stable --profile minimal
-      - run: rustup default stable
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 wine64
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component clippy
+      - run: rustup default ${{ env.RUST_VERSION }}
       - run: rustup target add x86_64-pc-windows-gnu
+      - run: cargo clippy --all-targets --locked --target x86_64-pc-windows-gnu -- -D warnings
+      - run: cargo test --locked --target x86_64-pc-windows-gnu
       - run: cargo build --release --locked --target x86_64-pc-windows-gnu
       - run: python3 tools/check_imports.py target/x86_64-pc-windows-gnu/release/desktop-stacks.exe
-      - run: cargo install cargo-audit --locked
+      - run: cargo install cargo-audit --locked --version 0.23.0
       - run: cargo audit

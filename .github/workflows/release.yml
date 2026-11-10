@@ -1,6 +1,6 @@
 # Builds the release exe from the tagged public source and publishes it with a SHA256 file
 # and a build provenance attestation, so a download can be traced back to this workflow
-# and this source. Runs when a tag like v0.1.0 is pushed.
+# and this source. Runs when a tag like v0.1.1 is pushed.
 name: Release
 
 on:
@@ -10,18 +10,33 @@ on:
 permissions:
   contents: read
 
+env:
+  # Same fixed Rust version as ci.yml.
+  RUST_VERSION: "1.99.1"
+
+# Actions are pinned to a full commit id (the version is in the comment): a tag can be
+# moved to other code later, a commit id cannot.
 jobs:
   # Compiles with read-only rights: nothing that runs during the build can publish anything.
+  # Nothing is published unless lint, tests and the dependency audit pass here, on the
+  # tagged source itself.
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER: /usr/lib/wine/wine64
+      WINEDEBUG: "-all"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
-      - run: rustup toolchain install stable --profile minimal
-      - run: rustup default stable
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 wine64
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component clippy
+      - run: rustup default ${{ env.RUST_VERSION }}
       - run: rustup target add x86_64-pc-windows-gnu
+      - run: cargo clippy --all-targets --locked --target x86_64-pc-windows-gnu -- -D warnings
+      - run: cargo test --locked --target x86_64-pc-windows-gnu
+      - run: cargo install cargo-audit --locked --version 0.23.0
+      - run: cargo audit
       - run: cargo build --release --locked --target x86_64-pc-windows-gnu
       - run: python3 tools/check_imports.py target/x86_64-pc-windows-gnu/release/desktop-stacks.exe
       - name: Package
@@ -31,7 +46,7 @@ jobs:
           cd dist
           sha256sum DesktopStacks.exe > DesktopStacks.exe.sha256
           cat DesktopStacks.exe.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release
           path: dist/
@@ -40,17 +55,17 @@ jobs:
   # Only this job may write: it attests and publishes exactly the files built above.
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write      # create the release
       id-token: write      # build provenance attestation
       attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release
       - run: sha256sum --check DesktopStacks.exe.sha256
-      - uses: actions/attest-build-provenance@v3
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-path: DesktopStacks.exe
       - name: Publish release

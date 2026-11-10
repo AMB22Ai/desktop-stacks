@@ -63,8 +63,11 @@ What that means for you:
   else slides the columns, and small arrows appear at the screen edge.
 - Double-click opens an item.
 - Right-click on an item shows the real Windows context menu. Right-click on
-  a closed stack shows it for all files of the stack at once, so Delete or
-  Cut there apply to every one of them (Windows still asks before deleting).
+  a closed stack shows it for all files of the stack at once, including the
+  ones hidden behind the top icons, so Delete or Cut there apply to every one
+  of them. Before such a Delete the app asks first and shows how many items
+  it is about (Windows itself, by default, moves files to the Recycle Bin
+  without asking). Dragging a closed stack likewise takes all of its files.
   Right-click on empty desktop shows the real desktop menu, plus Paste and
   Refresh.
 - Drag files out to other apps. Drop files onto the desktop, onto folders or
@@ -118,7 +121,7 @@ icons back.
 3. Delete the exe and the folder `%LOCALAPPDATA%\DesktopStacks`.
 
 If the desktop icons ever stay hidden: right-click the desktop, then
-View > Show desktop icons.
+View > Show desktop icons. Or start the app again and choose Exit.
 
 ## Verify your download
 
@@ -161,9 +164,14 @@ reads at most the first 64 KB to see whether the shortcut is a game. Every file
 action goes through the Windows shell, so menus, copy and move progress, Undo
 and security prompts behave as they do in Explorer.
 
-Pausing or exiting restores the normal desktop. A tiny second process (the
-same exe, started with `--watchdog`) restores the icons if the app is killed or
-crashes. They are also restored on sign-out.
+Pausing or exiting restores the normal desktop, and so does signing out. A
+tiny second process (the same exe, started with `--watchdog`) restores the
+icons if the app crashes or its process is ended on its own. This is a best
+effort, not a guarantee: ending every `DesktopStacks.exe` at once
+(`taskkill /IM`, or "End process tree" in Task Manager) ends the watchdog
+too, and nothing can run at a power cut or a system crash. Explorer remembers
+that its icons are hidden, so in those cases they stay hidden until you start
+the app again and choose Exit or Pause, or choose View > Show desktop icons.
 
 ### Performance design
 
@@ -197,7 +205,12 @@ and sleep.
   character, leave it off: while it is on, Windows gives that key combination
   to this app.
 - Registry: only if "Start with Windows" is ticked, it writes one value under
-  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Hiding and showing
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. The value holds the
+  place of the exe at the moment you tick it, so put the exe in its permanent
+  folder first. If you move the exe later, start it once from the new place:
+  the app corrects the value when the old place no longer holds a file.
+  Before deleting the exe, untick the item, because Windows would start
+  whatever file sits at that place later. Hiding and showing
   the desktop icons uses Explorer's own "Show desktop icons" switch, which
   Explorer remembers; if Explorer does not answer when the icons must come
   back, the app sets Explorer's `HideIcons` value to 0 itself.
@@ -223,10 +236,17 @@ and sleep.
   `tools/planting_test.ps1` tests it with about 40 fake DLLs. So far this was
   tested on one PC (Windows 11, build 26200).
 - In file name labels, direction-override characters and the common invisible
-  characters are removed, so a name cannot disguise its extension. Opening a
-  file always uses its real path, never the label.
+  characters are removed, and a run of blank space (including characters that
+  only look blank) is shown as one space. This stops the usual tricks for
+  disguising an extension, but a label is not proof of what a file is: as in
+  Explorer, Windows hides known extensions unless you turn that off, and a
+  long name is cut off after two lines. The stack a file is put in follows
+  its real extension, and opening a file always uses its real path, never
+  the label.
 - Dependencies are only the `windows-*` crates plus build-time proc-macro
-  crates. `cargo audit` was clean at release time.
+  crates. The release workflow runs lint, the unit tests and `cargo audit` on
+  the tagged source and publishes nothing if one of them fails. It uses one
+  fixed Rust version, and its GitHub Actions are pinned to exact commits.
 
 Same exposure as Explorer, by design:
 
@@ -279,7 +299,9 @@ python3 tools/check_imports.py target/x86_64-pc-windows-gnu/release/desktop-stac
 The last step checks that the exe links only to protected system DLLs (see
 [Privacy and security](#privacy-and-security)).
 
-Tests: run `cargo test` on Windows.
+Tests: run `cargo test` on Windows. On Linux the cross-built tests run with
+Wine: set `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER` to your `wine64` and run
+`cargo test --target x86_64-pc-windows-gnu`.
 
 ## Source map
 

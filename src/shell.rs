@@ -83,8 +83,30 @@ pub enum MenuOutcome {
     Rename,
 }
 
+/// A delete chosen for several files at once (right-click on a closed stack) is asked
+/// about first: on a default Windows the Recycle Bin does not ask, and most files of a
+/// closed stack are not even visible.
+fn needs_delete_confirmation(verb: &str, count: usize) -> bool {
+    count > 1 && verb.eq_ignore_ascii_case("delete")
+}
+
+fn confirm_delete(hwnd: HWND, count: usize) -> bool {
+    let text = if crate::i18n::is_arabic() {
+        format!("\u{062D}\u{0630}\u{0641} \u{0643}\u{0644} \u{0627}\u{0644}\u{0639}\u{0646}\u{0627}\u{0635}\u{0631} \u{0641}\u{064A} \u{0647}\u{0630}\u{0647} \u{0627}\u{0644}\u{0643}\u{0648}\u{0645}\u{0629} (\u{0627}\u{0644}\u{0639}\u{062F}\u{062F}: {count})\u{061F}")
+    } else {
+        format!("Delete all {count} items in this stack?")
+    };
+    let mut style = MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND;
+    if crate::i18n::is_arabic() {
+        style |= MB_RTLREADING | MB_RIGHT;
+    }
+    // "No" is the default button, so Enter or Esc deletes nothing.
+    unsafe { MessageBoxW(hwnd, &HSTRING::from(text), windows::core::w!("Desktop Stacks"), style) == IDYES }
+}
+
 /// Shows a shell context menu and runs the chosen command (except "rename", which we handle).
-fn run_menu(hwnd: HWND, cm: IContextMenu, pt: POINT, extra: &[(usize, String)]) -> (MenuOutcome, usize) {
+/// `count` is the number of files the menu is for (0 for the desktop background).
+fn run_menu(hwnd: HWND, cm: IContextMenu, pt: POINT, extra: &[(usize, String)], count: usize) -> (MenuOutcome, usize) {
     const FIRST: u32 = 1;
     const LAST: u32 = 0x6FFF;
     unsafe {
@@ -116,11 +138,23 @@ fn run_menu(hwnd: HWND, cm: IContextMenu, pt: POINT, extra: &[(usize, String)]) 
             return (MenuOutcome::None, cmd as usize);
         }
         let offset = (cmd - FIRST) as usize;
-        let mut verb = [0u16; 64];
-        let _ = cm.GetCommandString(offset, GCS_VERBW, None, PSTR(verb.as_mut_ptr() as *mut u8), verb.len() as u32);
-        let n = verb.iter().position(|&c| c == 0).unwrap_or(0);
-        if String::from_utf16_lossy(&verb[..n]).eq_ignore_ascii_case("rename") {
+        let mut wide = [0u16; 64];
+        let got = cm.GetCommandString(offset, GCS_VERBW, None, PSTR(wide.as_mut_ptr() as *mut u8), wide.len() as u32);
+        let n = wide.iter().position(|&c| c == 0).unwrap_or(0);
+        let mut verb = String::from_utf16_lossy(&wide[..n]);
+        if got.is_err() || verb.is_empty() {
+            // some menu handlers only answer in the older, non-Unicode form
+            let mut narrow = [0u8; 64];
+            if cm.GetCommandString(offset, GCS_VERBA, None, PSTR(narrow.as_mut_ptr()), narrow.len() as u32).is_ok() {
+                let n = narrow.iter().position(|&c| c == 0).unwrap_or(0);
+                verb = String::from_utf8_lossy(&narrow[..n]).into_owned();
+            }
+        }
+        if verb.eq_ignore_ascii_case("rename") {
             return (MenuOutcome::Rename, 0);
+        }
+        if needs_delete_confirmation(&verb, count) && !confirm_delete(hwnd, count) {
+            return (MenuOutcome::None, 0);
         }
         let info = CMINVOKECOMMANDINFOEX {
             cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
@@ -145,7 +179,7 @@ pub fn item_menu(hwnd: HWND, paths: &[String], pt: POINT, extra: &[(usize, Strin
         items_array(paths).and_then(|a| unsafe { a.BindToHandler(None, &BHID_SFUIObject).ok() })
     };
     match cm {
-        Some(cm) => run_menu(hwnd, cm, pt, extra),
+        Some(cm) => run_menu(hwnd, cm, pt, extra, paths.len()),
         None => {
             // Fall back to only our own items.
             unsafe {
@@ -180,7 +214,7 @@ pub fn background_menu(hwnd: HWND, dir: &str, real_desktop: bool, pt: POINT, ext
         root.or_else(|| folder_of(dir).and_then(|f| f.CreateViewObject::<_, IContextMenu>(hwnd).ok()))
     };
     match cm {
-        Some(cm) => run_menu(hwnd, cm, pt, extra).1,
+        Some(cm) => run_menu(hwnd, cm, pt, extra, 0).1,
         None => 0,
     }
 }
@@ -437,4 +471,24 @@ pub fn item_drop_target(hwnd: HWND, path: &str) -> Option<IDropTarget> {
 /// Drop target of the folder background (drop onto empty desktop).
 pub fn folder_drop_target(hwnd: HWND, dir: &str) -> Option<IDropTarget> {
     folder_of(dir).and_then(|f| unsafe { f.CreateViewObject::<_, IDropTarget>(hwnd).ok() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_delete_confirmation;
+
+    #[test]
+    fn delete_for_several_files_is_asked_about_first() {
+        assert!(needs_delete_confirmation("delete", 2));
+        assert!(needs_delete_confirmation("Delete", 20));
+    }
+
+    #[test]
+    fn one_file_and_other_commands_go_straight_to_windows() {
+        assert!(!needs_delete_confirmation("delete", 1));
+        assert!(!needs_delete_confirmation("delete", 0));
+        assert!(!needs_delete_confirmation("cut", 20));
+        assert!(!needs_delete_confirmation("properties", 20));
+        assert!(!needs_delete_confirmation("", 20));
+    }
 }

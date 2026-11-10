@@ -67,14 +67,54 @@ const MK_LBUTTON_: usize = 0x0001;
 
 static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
 
+/// True while this run has Explorer's icons hidden. Kept next to the marker file, so
+/// the icons still come back if that file is deleted while the app runs.
+static HID_BY_US: AtomicBool = AtomicBool::new(false);
+/// True once the watchdog process was started.
+static WATCHDOG_UP: AtomicBool = AtomicBool::new(false);
+
 /// Gives the normal desktop icons back if we hid them. Never touches APP, so it is
-/// safe from any context (logoff, panic hook, modal loops). The marker file is the
-/// single source of truth for "we hid them".
+/// safe from any context (logoff, panic hook, modal loops). "We hid them" is known
+/// from the marker file (it survives a crash and is what the watchdog reads) or from
+/// HID_BY_US (this run only).
 fn restore_icons() -> bool {
-    if !tray::marker_exists() {
+    if !needs_restore(HID_BY_US.load(Ordering::SeqCst), tray::marker_exists()) {
         return true;
     }
-    desktop::set_icons_visible(true) && tray::set_marker(false)
+    if desktop::set_icons_visible(true) && tray::set_marker(false) {
+        HID_BY_US.store(false, Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
+
+/// Icons must be given back when this run hid them or a marker says a run did.
+fn needs_restore(hid_by_us: bool, marker: bool) -> bool {
+    hid_by_us || marker
+}
+
+/// What to do when Explorer's icons are found already hidden.
+#[derive(Debug, PartialEq, Eq)]
+enum Hidden {
+    /// No marker and not hidden by this run: the user hid them. Leave everything alone.
+    ByUser,
+    /// Hidden by this run and the marker is ours: nothing to do.
+    Ours,
+    /// Hidden by this run, but the marker file is gone: write it again.
+    RewriteMarker,
+    /// The marker belongs to an earlier run that was killed: take it over, and look
+    /// once more shortly, because that run's watchdog may be restoring at this moment.
+    Claim,
+}
+
+fn hidden_state(hid_by_us: bool, marker: bool, owner: Option<u32>, me: u32) -> Hidden {
+    match (marker, hid_by_us) {
+        (false, false) => Hidden::ByUser,
+        (false, true) => Hidden::RewriteMarker,
+        (true, _) if owner == Some(me) => Hidden::Ours,
+        (true, _) => Hidden::Claim,
+    }
 }
 
 const CMD_TOGGLE_STACK: usize = 0x7100;
@@ -544,12 +584,16 @@ impl App {
     }
 
     fn hide_explorer_icons(&mut self) {
+        if !WATCHDOG_UP.load(Ordering::SeqCst) {
+            spawn_watchdog(); // it could not be started earlier: try again
+        }
         match desktop::icons_visible() {
             Some(true) => {
                 // Marker first, so the watchdog can always undo it. No marker, no hiding.
                 if !tray::set_marker(true) {
                     return;
                 }
+                HID_BY_US.store(true, Ordering::SeqCst);
                 if !desktop::set_icons_visible(false) && self.hide_retries < 30 {
                     // Explorer busy (e.g. at sign-in): try again shortly
                     self.hide_retries += 1;
@@ -560,6 +604,25 @@ impl App {
             }
             Some(false) => {
                 // Already hidden: by us earlier (marker exists) or by the user (left alone).
+                let hid = HID_BY_US.load(Ordering::SeqCst);
+                match hidden_state(hid, tray::marker_exists(), tray::marker_owner(), std::process::id()) {
+                    Hidden::ByUser => {}
+                    Hidden::Ours => HID_BY_US.store(true, Ordering::SeqCst),
+                    Hidden::RewriteMarker => {
+                        let _ = tray::set_marker(true);
+                    }
+                    Hidden::Claim => {
+                        if tray::set_marker(true) {
+                            HID_BY_US.store(true, Ordering::SeqCst);
+                            // The old run's watchdog may have read the marker just before
+                            // this and be about to show the icons: look again once. On
+                            // that pass the marker is ours, so this cannot repeat.
+                            unsafe {
+                                SetTimer(self.hwnd, TIMER_HIDE_RETRY, 2000, None);
+                            }
+                        }
+                    }
+                }
             }
             None => {
                 // Explorer not ready yet (early at sign-in): try again shortly.
@@ -1433,11 +1496,13 @@ fn run_watchdog(pid: u32) {
 fn spawn_watchdog() {
     use std::os::windows::process::CommandExt;
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe)
+        let started = std::process::Command::new(exe)
             .arg("--watchdog")
             .arg(std::process::id().to_string())
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .spawn();
+            .spawn()
+            .is_ok();
+        WATCHDOG_UP.store(started, Ordering::SeqCst);
     }
 }
 
@@ -1484,8 +1549,11 @@ fn main() {
 
     unsafe {
         harden::set_dpi_awareness();
-        let _mutex = CreateMutexW(None, true, w!("Local\\DesktopStacks.SingleInstance"));
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+        let mutex = CreateMutexW(None, true, w!("Local\\DesktopStacks.SingleInstance"));
+        // "Access denied" is the answer when the copy already running was started as
+        // administrator and this one was not: that is "already running" too.
+        let denied = mutex.as_ref().is_err_and(|e| e.code() == ERROR_ACCESS_DENIED.to_hresult());
+        if denied || GetLastError() == ERROR_ALREADY_EXISTS {
             message("Desktop Stacks is already running (see the tray icon).");
             return;
         }
@@ -1562,6 +1630,7 @@ fn main() {
         }
 
         let cfg = tray::load_config();
+        tray::repair_autostart();
         i18n::set(cfg.lang);
         let paused = cfg.paused;
         // taken by another program this time: shown unticked, but the saved wish is kept
@@ -1646,3 +1715,36 @@ fn main() {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{hidden_state, needs_restore, Hidden};
+
+    #[test]
+    fn icons_come_back_when_the_marker_file_was_deleted_while_running() {
+        assert!(needs_restore(true, false));
+        assert!(needs_restore(false, true));
+        assert!(needs_restore(true, true));
+    }
+
+    #[test]
+    fn icons_the_user_hid_are_left_alone() {
+        assert!(!needs_restore(false, false));
+        assert_eq!(hidden_state(false, false, None, 7), Hidden::ByUser);
+    }
+
+    #[test]
+    fn a_marker_left_by_a_killed_run_is_taken_over() {
+        assert_eq!(hidden_state(false, true, Some(3), 7), Hidden::Claim);
+        // not readable: treated the same way
+        assert_eq!(hidden_state(false, true, None, 7), Hidden::Claim);
+        // an old watchdog removed our marker and wrote nothing: ours again after the retry
+        assert_eq!(hidden_state(true, true, Some(3), 7), Hidden::Claim);
+    }
+
+    #[test]
+    fn our_own_marker_needs_nothing_and_a_lost_one_is_written_again() {
+        assert_eq!(hidden_state(true, true, Some(7), 7), Hidden::Ours);
+        assert_eq!(hidden_state(false, true, Some(7), 7), Hidden::Ours);
+        assert_eq!(hidden_state(true, false, None, 7), Hidden::RewriteMarker);
+    }
+}

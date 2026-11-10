@@ -1,0 +1,11 @@
+# Proposes updates for the pinned GitHub Actions in one pull request a month.
+# CI runs on that pull request before anything is merged.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

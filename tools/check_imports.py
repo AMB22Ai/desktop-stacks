@@ -25,7 +25,8 @@ ALLOWED = {
 }
 
 
-def imports(path):
+def parse(path):
+    """Returns (file bytes, offset of the optional header, function RVA -> file offset)."""
     data = open(path, "rb").read()
     pe = struct.unpack_from("<I", data, 0x3C)[0]
     if data[pe:pe + 4] != b"PE\0\0":
@@ -35,8 +36,6 @@ def imports(path):
     if struct.unpack_from("<H", data, opt)[0] != 0x20B:
         raise SystemExit("not a 64-bit PE file")
     opt_size = struct.unpack_from("<H", data, pe + 20)[0]
-    imp_rva = struct.unpack_from("<I", data, opt + 112 + 8 * 1)[0]
-    delay_rva = struct.unpack_from("<I", data, opt + 112 + 8 * 13)[0]
     secs = []
     for i in range(nsec):
         o = opt + opt_size + 40 * i
@@ -47,8 +46,14 @@ def imports(path):
         for vaddr, size, raw in secs:
             if vaddr <= rva < vaddr + size:
                 return rva - vaddr + raw
-        raise SystemExit("bad RVA in import table")
+        raise SystemExit("bad RVA in the exe")
 
+    return data, opt, off
+
+
+def imports(data, opt, off):
+    imp_rva = struct.unpack_from("<I", data, opt + 112 + 8 * 1)[0]
+    delay_rva = struct.unpack_from("<I", data, opt + 112 + 8 * 13)[0]
     names = []
     # (table RVA, size of one entry, where the DLL name RVA sits): normal and delay-load imports
     for table, step, name_at in ((imp_rva, 20, 12), (delay_rva, 32, 4)):
@@ -67,16 +72,56 @@ def imports(path):
     return sorted(set(names))
 
 
+def manifest(data, opt, off):
+    """Returns the manifest Windows will use: resource type 24 (RT_MANIFEST), id 1.
+    None if the exe has no such resource. The same text stored anywhere else in the
+    file (another resource type, a string) does not count, because Windows ignores it."""
+    res_rva = struct.unpack_from("<I", data, opt + 112 + 8 * 2)[0]
+    if res_rva == 0:
+        return None
+    base = off(res_rva)
+
+    def child(directory, wanted):
+        # a directory: 16 byte header, then entries of (name or id, offset); the top
+        # bit of the first field marks a name, the top bit of the second a subdirectory
+        named, ids = struct.unpack_from("<HH", data, base + directory + 12)
+        if named + ids > 4096:
+            return None
+        for i in range(named + ids):
+            key, target = struct.unpack_from("<II", data, base + directory + 16 + 8 * i)
+            if wanted is None or key == wanted:
+                return target
+        return None
+
+    try:
+        by_type = child(0, 24)
+        if by_type is None or not by_type & 0x80000000:
+            return None
+        by_id = child(by_type & 0x7FFFFFFF, 1)
+        if by_id is None or not by_id & 0x80000000:
+            return None
+        entry = child(by_id & 0x7FFFFFFF, None)  # any language
+        if entry is None or entry & 0x80000000:
+            return None
+        rva, size = struct.unpack_from("<II", data, base + entry)
+        start = off(rva)
+        return data[start:start + size]
+    except struct.error:
+        return None
+
+
 def main(path):
-    bad = [n for n in imports(path) if n not in ALLOWED]
-    for n in imports(path):
+    data, opt, off = parse(path)
+    found = imports(data, opt, off)
+    bad = [n for n in found if n not in ALLOWED]
+    for n in found:
         print(("  ok   " if n not in bad else "  BAD  ") + n)
     if bad:
         print("FAIL: load these at run time through src/harden.rs: " + ", ".join(bad))
         return 1
-    data = open(path, "rb").read()
-    if b"requestedExecutionLevel" not in data or b"<assembly" not in data:
-        print("FAIL: no manifest inside the exe (app.manifest was not embedded)")
+    text = manifest(data, opt, off)
+    if text is None or b"requestedExecutionLevel" not in text or b"<assembly" not in text:
+        print("FAIL: no manifest inside the exe (app.manifest was not embedded as resource type 24, id 1)")
         return 1
     print("imports are limited to protected system DLLs, manifest is built in")
     return 0

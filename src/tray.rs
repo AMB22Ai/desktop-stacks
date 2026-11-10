@@ -122,6 +122,7 @@ pub fn save_config(c: &Config) {
         bit(c.hotkey),
     );
     if let Some(d) = data_dir() {
+        let _ = std::fs::create_dir_all(&d); // the folder may have been deleted while running
         let _ = std::fs::write(d.join("config.txt"), text);
     }
 }
@@ -156,6 +157,7 @@ pub fn save_kind_choices(list: &[(String, bool)]) {
             text.push('\n');
         }
     }
+    let _ = std::fs::create_dir_all(&d);
     let _ = std::fs::write(d.join("kinds.txt"), text);
 }
 
@@ -175,6 +177,10 @@ pub fn marker_owner() -> Option<u32> {
 pub fn set_marker(on: bool) -> bool {
     let Some(m) = marker() else { return !on };
     if on {
+        // the folder may have been deleted while the app was running
+        if let Some(d) = m.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
         // holds our process id, so a watchdog left over from an earlier run can tell it is not its marker
         std::fs::write(&m, std::process::id().to_string()).is_ok() && m.exists()
     } else {
@@ -185,19 +191,62 @@ pub fn set_marker(on: bool) -> bool {
 
 // ---------- start with Windows ----------
 
-pub fn autostart_enabled() -> bool {
+/// The command Windows should run at sign-in: this exe, where it is now.
+fn own_command() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(format!("\"{}\"", exe.display()))
+}
+
+/// The command stored under the Run key, if there is one (None also when it is longer
+/// than any path this app would have written).
+fn stored_command() -> Option<String> {
+    let mut buf = [0u16; 1024];
+    let mut size = std::mem::size_of_val(&buf) as u32;
     unsafe {
-        let mut size = 0u32;
-        RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, None, Some(&mut size))
-            .is_ok()
+        RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut size))
+            .ok()
+            .ok()?;
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..n]))
+}
+
+/// Windows paths do not depend on letter case.
+fn same_command(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+/// The exe a stored command starts. This app only ever writes the quoted path.
+fn command_target(cmd: &str) -> &str {
+    cmd.trim().trim_matches('"')
+}
+
+/// Called once at start. If "Start with Windows" was ticked and the exe has been moved
+/// since, the entry still names the old place. When no file is there any more, the
+/// entry is corrected to where the exe is now, so the user's choice keeps working and
+/// no entry is left pointing at an empty place. An entry for another copy that still
+/// exists is left alone.
+pub fn repair_autostart() {
+    if let (Some(stored), Some(own)) = (stored_command(), own_command()) {
+        if !same_command(&stored, &own) && !std::path::Path::new(command_target(&stored)).exists() {
+            set_autostart(true);
+        }
+    }
+}
+
+/// Ticked only when the stored entry starts this very exe. An entry for another copy
+/// shows as unticked, and ticking it writes the current place.
+pub fn autostart_enabled() -> bool {
+    match (stored_command(), own_command()) {
+        (Some(stored), Some(own)) => same_command(&stored, &own),
+        _ => false,
     }
 }
 
 pub fn set_autostart(on: bool) {
     unsafe {
         if on {
-            let exe = std::env::current_exe().unwrap_or_default();
-            let cmd = format!("\"{}\"", exe.display());
+            let Some(cmd) = own_command() else { return };
             let wide: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
             let _ = RegSetKeyValueW(
                 HKEY_CURRENT_USER,
@@ -371,5 +420,25 @@ pub fn show_menu(hwnd: HWND, paused: bool, monitors: &[crate::desktop::Monitor],
         let _ = DestroyMenu(menu);
         let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
         cmd.0 as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{command_target, same_command};
+
+    #[test]
+    fn the_stored_command_gives_back_the_path_of_the_exe() {
+        assert_eq!(command_target("\"C:\\Tools\\DesktopStacks.exe\""), "C:\\Tools\\DesktopStacks.exe");
+        assert_eq!(command_target(" \"C:\\My Tools\\DesktopStacks.exe\" "), "C:\\My Tools\\DesktopStacks.exe");
+        assert_eq!(command_target(""), "");
+    }
+
+    #[test]
+    fn the_start_with_windows_tick_follows_the_stored_place() {
+        assert!(same_command("\"C:\\Tools\\DesktopStacks.exe\"", "\"c:\\tools\\desktopstacks.exe\""));
+        assert!(same_command(" \"C:\\Tools\\DesktopStacks.exe\" ", "\"C:\\Tools\\DesktopStacks.exe\""));
+        assert!(!same_command("\"C:\\Users\\x\\Downloads\\DesktopStacks.exe\"", "\"C:\\Tools\\DesktopStacks.exe\""));
+        assert!(!same_command("", "\"C:\\Tools\\DesktopStacks.exe\""));
     }
 }

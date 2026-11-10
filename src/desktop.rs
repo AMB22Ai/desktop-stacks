@@ -17,11 +17,31 @@ fn class_name(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
+/// Id of the process that owns a window (0 if it cannot be told).
+fn process_of(hwnd: HWND) -> u32 {
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    pid
+}
+
 /// Returns (SHELLDLL_DefView, SysListView32) of the desktop, wherever Explorer hosts it.
+/// The search starts from the desktop window that the shell registered with Windows
+/// (GetShellWindow), and only windows of that same process are accepted: a window of
+/// another program that merely carries the same class names is not taken for the desktop.
+/// This is a plausibility check, not a defence against a program that already runs as
+/// the same user (see SECURITY.md).
 fn find_desktop_view() -> Option<(HWND, HWND)> {
     unsafe {
+        let shell = GetShellWindow();
+        // 0: no shell has registered a desktop window (Explorer is starting, or another
+        // shell is in use). Then there is no process to compare with and the search goes
+        // by class name alone, as a fallback.
+        let shell_pid = if shell.0.is_null() { 0 } else { process_of(shell) };
+        let progman = if shell_pid != 0 { shell } else { FindWindowW(w!("Progman"), None).unwrap_or_default() };
         let mut defview = HWND::default();
-        if let Ok(progman) = FindWindowW(w!("Progman"), None) {
+        if !progman.0.is_null() {
             defview = FindWindowExW(progman, None, w!("SHELLDLL_DefView"), None).unwrap_or_default();
         }
         if defview.0.is_null() {
@@ -31,6 +51,9 @@ fn find_desktop_view() -> Option<(HWND, HWND)> {
                     Ok(h) if !h.0.is_null() => h,
                     _ => break,
                 };
+                if shell_pid != 0 && process_of(worker) != shell_pid {
+                    continue;
+                }
                 if let Ok(dv) = FindWindowExW(worker, None, w!("SHELLDLL_DefView"), None) {
                     if !dv.0.is_null() {
                         defview = dv;
@@ -39,11 +62,11 @@ fn find_desktop_view() -> Option<(HWND, HWND)> {
                 }
             }
         }
-        if defview.0.is_null() {
+        if defview.0.is_null() || (shell_pid != 0 && process_of(defview) != shell_pid) {
             return None;
         }
         let list = FindWindowExW(defview, None, w!("SysListView32"), None).ok()?;
-        if list.0.is_null() {
+        if list.0.is_null() || (shell_pid != 0 && process_of(list) != shell_pid) {
             return None;
         }
         Some((defview, list))
