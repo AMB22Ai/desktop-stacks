@@ -26,7 +26,7 @@ foreach ($n in $names) {
 $manifest = @'
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="DesktopStacks" version="0.1.1.0" processorArchitecture="amd64"/>
+  <assemblyIdentity type="win32" name="DesktopStacks" version="0.1.2.0" processorArchitecture="amd64"/>
   <file name="dwmapi.dll"/>
   <file name="d3d11.dll"/>
 </assembly>

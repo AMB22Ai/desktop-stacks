@@ -1,6 +1,6 @@
 [package]
 name = "desktop-stacks"
-version = "0.1.1"
+version = "0.1.2"
 license = "MIT"
 edition = "2021"
 description = "macOS-style desktop stacks for Windows 10 and 11"

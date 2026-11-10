@@ -4,7 +4,7 @@
      could otherwise redirect system DLLs to planted copies. It also states that the
      app never asks for administrator rights. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="DesktopStacks" version="0.1.1.0" processorArchitecture="amd64"/>
+  <assemblyIdentity type="win32" name="DesktopStacks" version="0.1.2.0" processorArchitecture="amd64"/>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
