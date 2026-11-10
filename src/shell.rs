@@ -2,12 +2,12 @@
 // so menus, drag and drop, delete, copy, "Open with" etc. behave like Explorer.
 
 use std::cell::RefCell;
-use windows::core::{implement, Interface, Result, HSTRING, PCSTR, PCWSTR, PSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, POINTL, WPARAM};
-use windows::Win32::System::Com::{CoCreateInstance, IDataObject, CLSCTX_INPROC_SERVER};
+use windows::core::{implement, IUnknown, IUnknownImpl, Interface, Result, GUID, HSTRING, PCSTR, PCWSTR, PSTR};
+use windows::Win32::Foundation::{BOOL, E_NOINTERFACE, E_NOTIMPL, E_POINTER, HWND, LPARAM, POINT, POINTL, RECT, WPARAM};
+use windows::Win32::System::Com::{CoCreateInstance, IDataObject, IServiceProvider, IServiceProvider_Impl, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Ole::{
-    IDropTarget, IDropTarget_Impl, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE,
-    DROPEFFECT_NONE,
+    IDropTarget, IDropTarget_Impl, IObjectWithSite, IOleWindow, IOleWindow_Impl, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK,
+    DROPEFFECT_MOVE, DROPEFFECT_NONE,
 };
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
@@ -106,7 +106,8 @@ fn confirm_delete(hwnd: HWND, count: usize) -> bool {
 
 /// Shows a shell context menu and runs the chosen command (except "rename", which we handle).
 /// `count` is the number of files the menu is for (0 for the desktop background).
-fn run_menu(hwnd: HWND, cm: IContextMenu, pt: POINT, extra: &[(usize, String)], count: usize) -> (MenuOutcome, usize) {
+/// `dir` is the folder a background menu is for: commands such as "New" act in it.
+fn run_menu(hwnd: HWND, cm: IContextMenu, pt: POINT, extra: &[(usize, String)], count: usize, dir: Option<&str>) -> (MenuOutcome, usize) {
     const FIRST: u32 = 1;
     const LAST: u32 = 0x6FFF;
     unsafe {
@@ -156,12 +157,18 @@ fn run_menu(hwnd: HWND, cm: IContextMenu, pt: POINT, extra: &[(usize, String)], 
         if needs_delete_confirmation(&verb, count) && !confirm_delete(hwnd, count) {
             return (MenuOutcome::None, 0);
         }
+        // The folder goes along in both text forms. The non-Unicode form is only given
+        // when it cannot be wrong, that is when the path is plain ASCII.
+        let dir_wide: Option<Vec<u16>> = dir.map(|d| d.encode_utf16().chain(std::iter::once(0)).collect());
+        let dir_narrow: Option<Vec<u8>> = dir.filter(|d| d.is_ascii()).map(|d| d.bytes().chain(std::iter::once(0)).collect());
         let info = CMINVOKECOMMANDINFOEX {
             cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
             fMask: 0x4000 | CMIC_MASK_PTINVOKE, // CMIC_MASK_UNICODE
             hwnd,
             lpVerb: PCSTR(offset as *const u8),
             lpVerbW: PCWSTR(offset as *const u16),
+            lpDirectory: dir_narrow.as_ref().map_or(PCSTR::null(), |d| PCSTR(d.as_ptr())),
+            lpDirectoryW: dir_wide.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
             nShow: SW_SHOWNORMAL.0,
             ptInvoke: pt,
             ..Default::default()
@@ -179,7 +186,7 @@ pub fn item_menu(hwnd: HWND, paths: &[String], pt: POINT, extra: &[(usize, Strin
         items_array(paths).and_then(|a| unsafe { a.BindToHandler(None, &BHID_SFUIObject).ok() })
     };
     match cm {
-        Some(cm) => run_menu(hwnd, cm, pt, extra, paths.len()),
+        Some(cm) => run_menu(hwnd, cm, pt, extra, paths.len(), None),
         None => {
             // Fall back to only our own items.
             unsafe {
@@ -214,8 +221,240 @@ pub fn background_menu(hwnd: HWND, dir: &str, real_desktop: bool, pt: POINT, ext
         root.or_else(|| folder_of(dir).and_then(|f| f.CreateViewObject::<_, IContextMenu>(hwnd).ok()))
     };
     match cm {
-        Some(cm) => run_menu(hwnd, cm, pt, extra, 0).1,
+        Some(cm) => {
+            // The "New" submenu only creates something when the window showing the menu
+            // answers its questions (see MenuSite). The site is set before the menu is
+            // built and taken away again afterwards.
+            let site: IServiceProvider = MenuSite { hwnd, dir: dir.to_string() }.into();
+            let holder = cm.cast::<IObjectWithSite>().ok();
+            if let Some(h) = &holder {
+                unsafe {
+                    let _ = h.SetSite(&site);
+                }
+            }
+            let cmd = run_menu(hwnd, cm, pt, extra, 0, Some(dir)).1;
+            if let Some(h) = &holder {
+                unsafe {
+                    let _ = h.SetSite(None::<&IUnknown>);
+                }
+            }
+            cmd
+        }
         None => 0,
+    }
+}
+
+// ---------- the "New" submenu of the desktop background menu ----------
+//
+// Windows builds the "New" submenu (Folder, Shortcut, Text Document, ...) itself, and
+// Windows creates the new item. But it first asks the window that shows the menu, its
+// "site", a few things that Explorer normally answers: which folder this is, whether
+// files and folders may both be offered, and which item to select for renaming once it
+// exists. Without a site the entries are shown and then do nothing. MenuSite gives
+// these answers and nothing more: every other request is refused.
+
+/// The item just made through "New", waiting to be renamed in place. Not a thread
+/// local: the shell may report the new item from a thread of its own.
+static NEW_ITEM: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The path of the item made through "New", once. Called for WM_APP_NEW.
+pub fn take_new_item() -> Option<String> {
+    NEW_ITEM.lock().ok().and_then(|mut n| n.take())
+}
+
+/// Called by the shell from inside the menu command: only notes the path and lets the
+/// window do the rest after the command has returned.
+fn note_new_item(hwnd: HWND, path: Option<String>) {
+    if let Some(path) = path {
+        match NEW_ITEM.lock() {
+            Ok(mut n) => *n = Some(path),
+            Err(_) => return,
+        }
+        unsafe {
+            let _ = PostMessageW(hwnd, crate::WM_APP_NEW, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// File system path of a full item id list (None for things that are not files).
+fn path_of(full: *const ITEMIDLIST) -> Option<String> {
+    if full.is_null() {
+        return None;
+    }
+    let mut buf = [0u16; 1024];
+    unsafe {
+        if !SHGetPathFromIDListEx(full, &mut buf, GPFIDL_DEFAULT).as_bool() {
+            return None;
+        }
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
+}
+
+/// INewMenuClient: both kinds of entries are wanted in the "New" submenu.
+const NEW_MENU_ITEMS_AND_FOLDERS: i32 = 1 | 2; // NMCII_ITEMS | NMCII_FOLDERS
+/// IShellView::SelectItem: "select and start renaming" (SVSI_EDIT, which includes SVSI_SELECT).
+const SELECT_AND_EDIT: u32 = 3;
+
+#[implement(IServiceProvider, INewMenuClient, IFolderView, IShellView)]
+struct MenuSite {
+    hwnd: HWND,
+    /// The folder the menu is for.
+    dir: String,
+}
+
+impl IServiceProvider_Impl for MenuSite_Impl {
+    fn QueryService(&self, _service: *const GUID, riid: *const GUID, ppv: *mut *mut core::ffi::c_void) -> Result<()> {
+        if riid.is_null() || ppv.is_null() {
+            return Err(E_POINTER.into());
+        }
+        unsafe {
+            *ppv = std::ptr::null_mut();
+            let iid = *riid;
+            // Only what the "New" submenu needs. Whatever else is asked for is refused.
+            if iid == INewMenuClient::IID || iid == IFolderView::IID || iid == IShellView::IID || iid == IOleWindow::IID {
+                return self.QueryInterface(riid, ppv).ok();
+            }
+        }
+        Err(E_NOINTERFACE.into())
+    }
+}
+
+impl INewMenuClient_Impl for MenuSite_Impl {
+    fn IncludeItems(&self) -> Result<i32> {
+        Ok(NEW_MENU_ITEMS_AND_FOLDERS)
+    }
+
+    /// Called twice for a new item: first to select it (flags 0), then to rename it
+    /// (flags 1, or 3 on Windows 10 and later). Only the rename request matters here.
+    fn SelectAndEditItem(&self, pidlitem: *const ITEMIDLIST, flags: i32) -> Result<()> {
+        if flags != 0 {
+            note_new_item(self.hwnd, path_of(pidlitem));
+        }
+        Ok(())
+    }
+}
+
+impl IFolderView_Impl for MenuSite_Impl {
+    fn GetCurrentViewMode(&self) -> Result<u32> {
+        Err(E_NOTIMPL.into())
+    }
+    fn SetCurrentViewMode(&self, _viewmode: u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    /// The folder of the menu, as whatever kind of shell object is asked for.
+    fn GetFolder(&self, riid: *const GUID, ppv: *mut *mut core::ffi::c_void) -> Result<()> {
+        if riid.is_null() || ppv.is_null() {
+            return Err(E_POINTER.into());
+        }
+        unsafe {
+            *ppv = std::ptr::null_mut();
+            if *riid == IShellItemArray::IID {
+                return match items_array(std::slice::from_ref(&self.dir)) {
+                    Some(a) => a.query(riid, ppv).ok(),
+                    None => Err(E_NOINTERFACE.into()),
+                };
+            }
+            if let Some(folder) = folder_of(&self.dir) {
+                if folder.query(riid, ppv).is_ok() {
+                    return Ok(());
+                }
+            }
+            *ppv = std::ptr::null_mut();
+            match item(&self.dir) {
+                Some(i) => i.query(riid, ppv).ok(),
+                None => Err(E_NOINTERFACE.into()),
+            }
+        }
+    }
+    fn Item(&self, _iitemindex: i32) -> Result<*mut ITEMIDLIST> {
+        Err(E_NOTIMPL.into())
+    }
+    fn ItemCount(&self, _uflags: &_SVGIO) -> Result<i32> {
+        Err(E_NOTIMPL.into())
+    }
+    fn Items(&self, _uflags: &_SVGIO, _riid: *const GUID, _ppv: *mut *mut core::ffi::c_void) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetSelectionMarkedItem(&self) -> Result<i32> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetFocusedItem(&self) -> Result<i32> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetItemPosition(&self, _pidl: *const ITEMIDLIST) -> Result<POINT> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetSpacing(&self, _ppt: *mut POINT) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetDefaultSpacing(&self) -> Result<POINT> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetAutoArrange(&self) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn SelectItem(&self, _iitem: i32, _dwflags: u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn SelectAndPositionItems(&self, _cidl: u32, _apidl: *const *const ITEMIDLIST, _apt: *const POINT, _dwflags: u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+impl IOleWindow_Impl for MenuSite_Impl {
+    fn GetWindow(&self) -> Result<HWND> {
+        Ok(self.hwnd)
+    }
+    fn ContextSensitiveHelp(&self, _fentermode: BOOL) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+impl IShellView_Impl for MenuSite_Impl {
+    fn TranslateAccelerator(&self, _pmsg: *const MSG) -> windows::core::HRESULT {
+        E_NOTIMPL
+    }
+    fn EnableModeless(&self, _fenable: BOOL) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn UIActivate(&self, _ustate: u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn Refresh(&self) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn CreateViewWindow(&self, _previous: Option<&IShellView>, _pfs: *const FOLDERSETTINGS, _psb: Option<&IShellBrowser>, _prcview: *const RECT) -> Result<HWND> {
+        Err(E_NOTIMPL.into())
+    }
+    fn DestroyViewWindow(&self) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetCurrentInfo(&self) -> Result<FOLDERSETTINGS> {
+        Err(E_NOTIMPL.into())
+    }
+    fn AddPropertySheetPages(&self, _dwreserved: u32, _pfn: windows::Win32::UI::Controls::LPFNSVADDPROPSHEETPAGE, _lparam: LPARAM) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn SaveViewState(&self) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    /// Older way of asking for the same thing as SelectAndEditItem: the item is given
+    /// relative to the folder.
+    fn SelectItem(&self, pidlitem: *const ITEMIDLIST, uflags: u32) -> Result<()> {
+        if uflags & SELECT_AND_EDIT == SELECT_AND_EDIT && !pidlitem.is_null() {
+            if let Some(parent) = pidl(&self.dir) {
+                let full = unsafe { ILCombine(Some(parent.0 as *const _), Some(pidlitem)) };
+                if !full.is_null() {
+                    let full = Pidl(full);
+                    note_new_item(self.hwnd, path_of(full.0));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn GetItemObject(&self, _uitem: &_SVGIO, _riid: *const GUID, _ppv: *mut *mut core::ffi::c_void) -> Result<()> {
+        Err(E_NOTIMPL.into())
     }
 }
 

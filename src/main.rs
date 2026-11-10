@@ -51,6 +51,8 @@ pub const WM_APP_ICON: u32 = WM_APP + 1;
 pub const WM_APP_FS: u32 = WM_APP + 2;
 pub const WM_APP_TRAY: u32 = WM_APP + 3;
 pub const WM_APP_FG: u32 = WM_APP + 4;
+/// An item was made through the "New" submenu and should now be renamed in place.
+pub const WM_APP_NEW: u32 = WM_APP + 5;
 
 const TIMER_ANIM: usize = 1;
 const TIMER_RESCAN: usize = 2;
@@ -1336,6 +1338,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_APP_FG => {
             now_or_later(hwnd, PEND_FOREGROUND);
+            return LRESULT(0);
+        }
+        WM_APP_NEW => {
+            // Show the new item at once (not after the usual short wait for folder
+            // changes) and start renaming it, as Explorer does. If it went into a closed
+            // stack it has no label of its own on screen, and then nothing more happens.
+            if let Some(path) = shell::take_new_item() {
+                let key = layout::file_key(&path);
+                let info = with_app(|a| {
+                    a.rescan(false);
+                    (a.label_rect_screen(&key), a.geom.s)
+                });
+                if let Some((Some(r), s)) = info {
+                    rename::start(hwnd, &path, r, s);
+                }
+            }
             return LRESULT(0);
         }
         WM_HOTKEY => {
