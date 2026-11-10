@@ -260,6 +260,9 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 ## Known limits
 
 - Early release, used on one PC only (Windows 11).
+- "New" (folder, shortcut, text document) in the right-click menu of the empty
+  desktop does not create anything yet. Until this is fixed, choose Pause,
+  create the item on the normal desktop, then resume.
 - Windows 10 and 11, 64-bit only. No Windows 7 or 8, and no 32-bit build. It
   should run on Windows 11 ARM through x64 emulation, but this is untested.
 - No keyboard navigation and no screen-reader support yet.
