@@ -26,6 +26,11 @@ using only the `windows` crate, and licensed under MIT.
 This is an early release. So far it has been used on one PC only (Windows 11,
 one desktop GPU). Expect rough edges. See [Known limits](#known-limits).
 
+> **Not code-signed yet.** On Windows 11 PCs where **Smart App Control** is
+> turned on, Windows blocks the app and offers no way to run it. On other PCs
+> Windows shows a SmartScreen warning that you can pass. Check which case is
+> yours before you download: see [Smart App Control](#smart-app-control).
+
 ## Built with AI
 
 This project was programmed with AI. The code was written by Claude, an AI
@@ -100,8 +105,15 @@ Tray icon menu:
 2. Put it in its own folder, for example `%LOCALAPPDATA%\Programs\DesktopStacks`.
 3. Run it.
 
-The exe is not code-signed, so see [Verify your download](#verify-your-download)
-and [SmartScreen](#smartscreen) below.
+The exe is not code-signed. What Windows does with it depends on your PC:
+
+- **Smart App Control is On:** Windows blocks the app ("Smart App Control
+  blocked an app that may be unsafe") and there is no button to run it anyway.
+  See [Smart App Control](#smart-app-control).
+- **Otherwise:** Windows SmartScreen shows a warning on first run that you can
+  pass. See [SmartScreen](#smartscreen).
+
+Either way, see [Verify your download](#verify-your-download).
 
 ### Try it safely first
 
@@ -148,6 +160,32 @@ The exe is not code-signed. On first run, Windows SmartScreen shows "Windows
 protected your PC". This is expected for unsigned software. Choose More info,
 then Run anyway. If you prefer not to, build from source (below) and run your
 own build.
+
+### Smart App Control
+
+Smart App Control is a security feature of Windows 11. When it is On, Windows
+only runs apps that are signed by a known publisher or that Microsoft already
+recognizes. Desktop Stacks is neither yet, so Windows blocks it with the
+message "Smart App Control blocked an app that may be unsafe ... because we
+could not verify its publisher".
+
+- **Does it apply to you?** Open Windows Security, then App & browser control,
+  then Smart App Control settings. If it says Off or Evaluation, the app is
+  not blocked by it. If it says On, the app will not start.
+- **It is not your antivirus.** Turning off virus protection changes nothing
+  here: Smart App Control is a separate setting, and it has no "Run anyway".
+- **The block is about the missing signature**, not about something found in
+  the file. You can still check the file yourself with
+  [Verify your download](#verify-your-download).
+- **Building from source does not help:** your own build is unsigned too.
+- **This project does not ask you to turn a Windows protection off.** That is
+  your decision. If you consider it, know that on Windows 11 versions from
+  before the April 2026 update, Smart App Control cannot be turned on again
+  without resetting Windows.
+
+Code signing for the releases is planned, through a free signing program for
+open source projects. It needs that program's approval, so there is no date
+yet. Until then the app cannot run on PCs where Smart App Control is On.
 
 ## How it works
 
@@ -260,6 +298,8 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 ## Known limits
 
 - Early release, used on one PC only (Windows 11).
+- Not code-signed yet. Windows 11 PCs with Smart App Control turned On block
+  the app completely. See [Smart App Control](#smart-app-control).
 - Windows 10 and 11, 64-bit only. No Windows 7 or 8, and no 32-bit build. It
   should run on Windows 11 ARM through x64 emulation, but this is untested.
 - No keyboard navigation and no screen-reader support yet.
